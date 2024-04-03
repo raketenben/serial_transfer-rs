@@ -65,12 +65,22 @@ impl SerialTransfer {
 		let buffer : [u8;COUNT] = unsafe { transmute_copy(&data) };
 		let buffer = buffer.to_vec();
 
+		//find first START_BYTE occurence in packet data
+		let overflow_byte = match buffer.iter().position(|&x| x == START_BYTE) {
+			Some(index) => index as u8,
+			None => MAX_PACKET_SIZE,
+		};
+
+		//encode data with COBS
+		let buffer = self.encode_data_cobs(buffer);
+
+		//calculate CRC (Error Detection Code)
 		let crc = self.crc.calculate(&buffer,None);
 
 		let mut packet : Vec<u8> = Vec::new();
 		packet.push(START_BYTE);
 		packet.push(0);
-		packet.push(255);
+		packet.push(overflow_byte);
 		packet.push(buffer.len() as u8);
 		packet.append(&mut buffer.clone());
 		packet.push(crc);
@@ -87,7 +97,6 @@ impl SerialTransfer {
 		while self.serialport.bytes_to_read()? > 0 {
 			let mut byte : [u8;1] = [0;1];
 			self.serialport.read(&mut byte)?;
-
 	
 			match self.transfer_state {
 				TransferState::FindStartByte => {
@@ -118,6 +127,7 @@ impl SerialTransfer {
 						self.payload.push(byte[0]);
 	
 						if self.payload.len() == self.payload_length.into() {
+							self.payload = self.decode_data_cobs(self.payload.clone(),self.overhead_byte);
 							self.transfer_state = TransferState::FindCrc;
 						} else {
 							self.transfer_state = TransferState::FindPayload;
@@ -154,5 +164,41 @@ impl SerialTransfer {
 		}
 
 		Ok(None)
+	}
+
+	fn encode_data_cobs(&mut self, mut data : Vec<u8>) -> Vec<u8> {
+		//find last byte
+		let last_byte_index = data.iter().rev().position(|&x| x == START_BYTE);
+
+		match last_byte_index {
+			Some(index) => {
+				let mut reference_index = index;
+
+				for i in (0..data.len()).rev() {
+					if data[i] == START_BYTE {
+						data[i] = (reference_index - i) as u8;
+						reference_index = i;
+					}
+				}
+
+				data
+			},
+			None => {
+				data
+			}
+		}
+	}
+
+	fn decode_data_cobs(&mut self, mut data : Vec<u8>, overhead_byte : u8) -> Vec<u8> {
+		let mut reference_index = overhead_byte;
+
+		while reference_index <= data.len() as u8 {
+			let offset = data[reference_index as usize];
+			data[reference_index as usize] = START_BYTE;
+			reference_index += offset;
+		}
+		data[reference_index as usize] = START_BYTE;
+
+		data
 	}
 }
