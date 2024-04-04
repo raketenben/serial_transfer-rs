@@ -1,10 +1,11 @@
-use std::io::Read;
+use std::{io::Read, num::Wrapping};
 use std::mem::transmute_copy;
 use serialport::{Error, SerialPort};
 
 mod crc;
 use crc::CRC;
 
+#[derive(Debug)]
 enum TransferStatus {
 	Continue = 3,
 	NewData = 2,
@@ -14,6 +15,7 @@ enum TransferStatus {
 	StopByteError = -2,
 }
 
+#[derive(Debug)]
 enum TransferState {
 	FindStartByte = 0,
 	FindIdByte = 1,
@@ -67,8 +69,8 @@ impl SerialTransfer {
 
 		//find first START_BYTE occurence in packet data
 		let overflow_byte = match buffer.iter().position(|&x| x == START_BYTE) {
-			Some(index) => index as u8,
-			None => MAX_PACKET_SIZE,
+			Some(index) => (index) as u8,
+			None => 0xFF,
 		};
 
 		//encode data with COBS
@@ -95,9 +97,11 @@ impl SerialTransfer {
 	pub fn available<T : Sized, const COUNT: usize>(&mut self) -> Result<Option<T>,Error> {
 
 		while self.serialport.bytes_to_read()? > 0 {
+			//show state and status in test only
+
 			let mut byte : [u8;1] = [0;1];
 			self.serialport.read(&mut byte)?;
-	
+
 			match self.transfer_state {
 				TransferState::FindStartByte => {
 					if byte[0] == START_BYTE {
@@ -127,7 +131,7 @@ impl SerialTransfer {
 						self.payload.push(byte[0]);
 	
 						if self.payload.len() == self.payload_length.into() {
-							self.payload = self.decode_data_cobs(self.payload.clone(),self.overhead_byte);
+
 							self.transfer_state = TransferState::FindCrc;
 						} else {
 							self.transfer_state = TransferState::FindPayload;
@@ -135,8 +139,12 @@ impl SerialTransfer {
 					}
 				},
 				TransferState::FindCrc => {
+					
 					let calculated_crc = self.crc.calculate(&self.payload,Some(self.payload_length));
 					let received_crc = byte[0];
+
+					//decode data with COBS
+					self.payload = self.decode_data_cobs(self.payload.clone(),self.overhead_byte);
 
 					if calculated_crc == received_crc {
 						self.transfer_state = TransferState::FindStopByte;
@@ -151,16 +159,22 @@ impl SerialTransfer {
 					if byte[0] == STOP_BYTE {
 						self.transfer_state = TransferState::FindStartByte;
 						self.status = TransferStatus::NewData;
-						let buffer : [u8;COUNT] = self.payload.clone().try_into().expect("Failed to convert payload to array");
-						let dst : T = unsafe { transmute_copy(&buffer) };
-						return Ok(Some(dst))
+						let buffer_conversion : Result<[u8;COUNT],Vec<u8>> = self.payload.clone().try_into();
+
+						match buffer_conversion {
+							Ok(buffer) => {
+								let dst : T = unsafe { transmute_copy(&buffer) };
+								return Ok(Some(dst))
+							}
+							Err(_) => {
+								self.status = TransferStatus::PayloadError;
+							}
+						}
 					} else {
 						self.status = TransferStatus::StopByteError;
 					}
 				},
 			}
-	
-			self.status = TransferStatus::Continue
 		}
 
 		Ok(None)
@@ -168,15 +182,22 @@ impl SerialTransfer {
 
 	fn encode_data_cobs(&mut self, mut data : Vec<u8>) -> Vec<u8> {
 		//find last byte
-		let last_byte_index = data.iter().rev().position(|&x| x == START_BYTE);
+		let mut last_byte_index : Option<usize> = None;
+		for i in (0..data.len()).rev() {
+			if data[i] == START_BYTE {
+				last_byte_index = Some(i);
+				break;
+			}
+		}
 
 		match last_byte_index {
 			Some(index) => {
-				let mut reference_index = index;
+				let mut reference_index : u8 = index as u8;
 
-				for i in (0..data.len()).rev() {
-					if data[i] == START_BYTE {
-						data[i] = (reference_index - i) as u8;
+				for i in (0..data.len() as u8).rev() {
+					if data[i as usize] == START_BYTE {
+						let (new_reference_index, _overflowed) = reference_index.overflowing_sub(i);
+						data[i as usize] = new_reference_index as u8;
 						reference_index = i;
 					}
 				}
@@ -191,13 +212,14 @@ impl SerialTransfer {
 
 	fn decode_data_cobs(&mut self, mut data : Vec<u8>, overhead_byte : u8) -> Vec<u8> {
 		let mut reference_index = overhead_byte;
+		let mut overflowed;
 
-		while reference_index <= data.len() as u8 {
+		while reference_index < data.len() as u8 {
 			let offset = data[reference_index as usize];
 			data[reference_index as usize] = START_BYTE;
-			reference_index += offset;
+			(reference_index, overflowed) = reference_index.overflowing_add(offset);
+			if overflowed { break; }
 		}
-		data[reference_index as usize] = START_BYTE;
 
 		data
 	}
