@@ -222,4 +222,9 @@ impl SerialTransfer {
 
 		data
 	}
+
+	pub fn flush(&mut self) -> Result<(),Error> {
+		self.serialport.flush()?;
+		Ok(())
+	}
 }
