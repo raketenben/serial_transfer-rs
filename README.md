@@ -39,3 +39,6 @@ match result {
 	}
 }
 ```
+
+## Troubleshooting
+In some cases you may get an IO-Timeout when sending packages, try to configure a timeout on your transfer to prevent this from happening

@@ -89,7 +89,6 @@ impl SerialTransfer {
 		packet.push(STOP_BYTE);
 
 		self.serialport.write(&packet)?;
-		self.serialport.flush()?;
 
 		Ok(())
 	}
@@ -101,6 +100,8 @@ impl SerialTransfer {
 
 			let mut byte : [u8;1] = [0;1];
 			self.serialport.read(&mut byte)?;
+
+			print!("{}",byte[0] as char);
 
 			match self.transfer_state {
 				TransferState::FindStartByte => {
