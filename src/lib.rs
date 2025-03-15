@@ -1,3 +1,51 @@
+/*!
+# SerialTransfer
+
+SerialTransfer is a Rust library that allows you to send and receive data over a serial port.
+This is a port of the [SerialTransfer](https://github.com/PowerBroker2/SerialTransfer) library for Arduino.
+
+## Usage
+Add the following to your Cargo.toml
+```toml
+[dependencies]
+serialtransfer = "0.2"
+```
+
+Import the library
+```rust
+use serialtransfer::SerialTransfer;
+```
+
+Declaring a struct to send over the serial port
+```rust
+#[derive(Debug)]
+struct Foo {
+	bar: u8,
+}
+```
+
+### Instantiation
+Open a serial port and pass it to SerialTransfer
+```no_run
+let port = serialport::new("COM4", 9600).open().expect("Failed to open serial port");
+let serial = SerialTransfer::from(port);
+```
+
+### Sending Data
+Create an instance of the struct and send it over the serial port
+```no_run
+let mut foo = Foo { bar: 42 };
+serial.send::<Foo, 1>(&foo).expect("Failed to send data");
+```
+
+### Receiving Data
+and to recieve the data
+```no_run
+let received_foo = serial.available::<Foo, 1>().expect("Failed to receive data");
+```
+**_NOTE:_** You need to specify the size of the struct in bytes as a const parameter. (e.g. **<Foo, 1>** for a struct with a single byte field)
+*/
+
 use std::io::Error;
 use std::io::{Read, Write};
 use std::mem::transmute_copy;
@@ -5,8 +53,6 @@ use std::mem::transmute_copy;
 mod crc;
 mod tests;
 use crc::CRC;
-#[cfg(feature = "serialport")]
-use serialport::SerialPort;
 
 #[derive(Debug)]
 enum NextToken {
@@ -29,11 +75,9 @@ const MAX_PACKET_SIZE: u8 = 0xFE;
 pub trait ReadWrite: Read + Write {}
 impl<T: Read + Write> ReadWrite for T {}
 
-/// This struct is used to send and receive data over a serial port
 pub struct SerialTransfer<P: ReadWrite> {
     crc: CRC,
 
-    //serialport: Box<dyn SerialPort>,
     read_write: P,
     next_token: NextToken,
 
@@ -44,6 +88,7 @@ pub struct SerialTransfer<P: ReadWrite> {
 }
 
 #[cfg(feature = "serialport")]
+use serialport::SerialPort;
 impl From<Box<dyn SerialPort>> for SerialTransfer<Box<dyn SerialPort>> {
     fn from(serialport: Box<dyn SerialPort>) -> Self {
         SerialTransfer::new(serialport)
