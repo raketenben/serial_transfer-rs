@@ -26,15 +26,15 @@ const MAX_PACKET_SIZE: u8 = 0xFE;
 
 /// Trait for Read and Write
 /// This allows us to accept any type that implements both Read and Write
-pub trait RW: Read + Write {}
-impl<T: Read + Write> RW for T {}
+pub trait ReadWrite: Read + Write {}
+impl<T: Read + Write> ReadWrite for T {}
 
 /// This struct is used to send and receive data over a serial port
-pub struct SerialTransfer<'a> {
+pub struct SerialTransfer<P: ReadWrite> {
     crc: CRC,
 
     //serialport: Box<dyn SerialPort>,
-    read_write: &'a mut dyn RW,
+    read_write: P,
     next_token: NextToken,
 
     id_byte: u8,
@@ -44,20 +44,20 @@ pub struct SerialTransfer<'a> {
 }
 
 #[cfg(feature = "serialport")]
-impl<'a> From<&'a mut Box<dyn SerialPort + 'a>> for SerialTransfer<'a> {
-    fn from(port: &'a mut Box<dyn SerialPort + 'a>) -> Self {
-        SerialTransfer::new(port)
+impl From<Box<dyn SerialPort>> for SerialTransfer<Box<dyn SerialPort>> {
+    fn from(serialport: Box<dyn SerialPort>) -> Self {
+        SerialTransfer::new(serialport)
     }
 }
 
-impl<'a> SerialTransfer<'a> {
-    pub fn new(read_write: &'a mut dyn RW) -> SerialTransfer<'a> {
+impl<P: ReadWrite> SerialTransfer<P> {
+    pub fn new(read_write: P) -> SerialTransfer<P> {
         println!("new");
         SerialTransfer {
             crc: CRC::new(0x9B),
 
             next_token: NextToken::StartByte,
-            read_write: read_write,
+            read_write,
             id_byte: 0,
             overhead_byte: 0,
             payload_length: 0,
@@ -113,7 +113,7 @@ impl<'a> SerialTransfer<'a> {
             match self.next_token {
                 NextToken::StartByte => {
                     if byte[0] == START_BYTE {
-                    	self.next_token = NextToken::IdByte;
+                        self.next_token = NextToken::IdByte;
                     }
                 }
                 NextToken::IdByte => {
@@ -172,12 +172,12 @@ impl<'a> SerialTransfer<'a> {
                                 return Ok(Some(dst));
                             }
                             Err(_) => {
-								return Ok(None);
+                                return Ok(None);
                             }
                         }
                     } else {
-						self.next_token = NextToken::StartByte;
-						return Ok(None);
+                        self.next_token = NextToken::StartByte;
+                        return Ok(None);
                     }
                 }
             }

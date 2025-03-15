@@ -2,13 +2,19 @@
 name = "serial_transfer"
 version = "0.1.0"
 edition = "2021"
+resolver = "2"
+
+
+[features]
+default = ["serialport_cast"]
+serialport_cast = ["serialport"]
 
 [dependencies]
 serialport = { version = "4.3.0", optional = true }
 
 [dev-dependencies]
-serialport = { version = "4.3.0" }
+serialport = { version = "4.7.0" }
 
-[features]
-default = ["serialport_cast"]
-serialport_cast = ["serialport"]
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "warn"
