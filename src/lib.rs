@@ -10,13 +10,13 @@ use serialport::SerialPort;
 
 #[derive(Debug)]
 enum NextToken {
-    StartByte = 0,
-    IdByte = 1,
-    OverheadByte = 2,
-    PayloadLength = 3,
-    Payload = 4,
-    Crc = 5,
-    StopByte = 6,
+    StartByte,
+    IdByte,
+    OverheadByte,
+    PayloadLength,
+    Payload,
+    Crc,
+    StopByte,
 }
 
 const START_BYTE: u8 = 0x7E;
