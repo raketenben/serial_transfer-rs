@@ -1,230 +1,239 @@
-use std::{io::Read, num::Wrapping};
+use std::io::Error;
+use std::io::{Read, Write};
 use std::mem::transmute_copy;
-use serialport::{Error, SerialPort};
 
 mod crc;
+mod tests;
 use crc::CRC;
+#[cfg(feature = "serialport")]
+use serialport::SerialPort;
 
 #[derive(Debug)]
-enum TransferStatus {
-	Continue = 3,
-	NewData = 2,
-	NoData = 1,
-	CrcError = 0,
-	PayloadError = -1,
-	StopByteError = -2,
+enum NextToken {
+    StartByte = 0,
+    IdByte = 1,
+    OverheadByte = 2,
+    PayloadLength = 3,
+    Payload = 4,
+    Crc = 5,
+    StopByte = 6,
 }
 
-#[derive(Debug)]
-enum TransferState {
-	FindStartByte = 0,
-	FindIdByte = 1,
-	FindOverheadByte = 2,
-	FindPayloadLength = 3,
-	FindPayload = 4,
-	FindCrc = 5,
-	FindStopByte = 6,
+const START_BYTE: u8 = 0x7E;
+const STOP_BYTE: u8 = 0x81;
+
+const MAX_PACKET_SIZE: u8 = 0xFE;
+
+/// Trait for Read and Write
+/// This allows us to accept any type that implements both Read and Write
+pub trait RW: Read + Write {}
+impl<T: Read + Write> RW for T {}
+
+/// This struct is used to send and receive data over a serial port
+pub struct SerialTransfer<'a> {
+    crc: CRC,
+
+    //serialport: Box<dyn SerialPort>,
+    read_write: &'a mut dyn RW,
+    next_token: NextToken,
+
+    id_byte: u8,
+    overhead_byte: u8,
+    payload_length: u8,
+    payload: Vec<u8>,
 }
 
-const START_BYTE : u8 = 0x7E;
-const STOP_BYTE : u8 = 0x81;
-
-const MAX_PACKET_SIZE : u8 = 0xFE;
-
-
-
-pub struct SerialTransfer {
-	crc : CRC,
-
-	serialport : Box<dyn SerialPort>,
-	status : TransferStatus,
-	transfer_state : TransferState,
-
-	id_byte : u8,
-	overhead_byte : u8,
-	payload_length : u8,
-	payload : Vec<u8>,
+#[cfg(feature = "serialport")]
+impl<'a> From<&'a mut Box<dyn SerialPort + 'a>> for SerialTransfer<'a> {
+    fn from(port: &'a mut Box<dyn SerialPort + 'a>) -> Self {
+        SerialTransfer::new(port)
+    }
 }
 
-impl SerialTransfer {
+impl<'a> SerialTransfer<'a> {
+    pub fn new(read_write: &'a mut dyn RW) -> SerialTransfer<'a> {
+        println!("new");
+        SerialTransfer {
+            crc: CRC::new(0x9B),
 
-	pub fn new(port : Box<dyn SerialPort>) -> SerialTransfer {
-		SerialTransfer {
-			crc : CRC::new(0x9B),
+            next_token: NextToken::StartByte,
+            read_write: read_write,
+            id_byte: 0,
+            overhead_byte: 0,
+            payload_length: 0,
+            payload: Vec::new(),
+        }
+    }
 
-			status : TransferStatus::Continue,
-			transfer_state : TransferState::FindStartByte,
-			serialport : port,
+    /// Sends data over the serial port.
+    /// Count is the size in bytes of the data to send.
+    pub fn send<T: Sized, const COUNT: usize>(&mut self, data: T) -> Result<(), Error> {
+        let buffer: [u8; COUNT] = unsafe { transmute_copy(&data) };
+        let buffer = buffer.to_vec();
 
-			id_byte: 0,
-			overhead_byte: 0,
-			payload_length: 0,
-			payload: Vec::new(),
-		}
-	}
+        //find first START_BYTE occurence in packet data
+        let overflow_byte = match buffer.iter().position(|&x| x == START_BYTE) {
+            Some(index) => (index) as u8,
+            None => 0xFF,
+        };
 
-	pub fn send<T : Sized, const COUNT: usize>(&mut self, data : T) -> Result<(),Error> {
-		let buffer : [u8;COUNT] = unsafe { transmute_copy(&data) };
-		let buffer = buffer.to_vec();
+        //encode data with COBS
+        let buffer = self.encode_data_cobs(buffer);
 
-		//find first START_BYTE occurence in packet data
-		let overflow_byte = match buffer.iter().position(|&x| x == START_BYTE) {
-			Some(index) => (index) as u8,
-			None => 0xFF,
-		};
+        //calculate CRC (Error Detection Code)
+        let crc = self.crc.calculate(&buffer, None);
 
-		//encode data with COBS
-		let buffer = self.encode_data_cobs(buffer);
+        let mut packet: Vec<u8> = Vec::new();
+        packet.push(START_BYTE);
+        packet.push(0);
+        packet.push(overflow_byte);
+        packet.push(buffer.len() as u8);
+        packet.append(&mut buffer.clone());
+        packet.push(crc);
+        packet.push(STOP_BYTE);
 
-		//calculate CRC (Error Detection Code)
-		let crc = self.crc.calculate(&buffer,None);
+        let _ = self.read_write.write(&packet)?;
 
-		let mut packet : Vec<u8> = Vec::new();
-		packet.push(START_BYTE);
-		packet.push(0);
-		packet.push(overflow_byte);
-		packet.push(buffer.len() as u8);
-		packet.append(&mut buffer.clone());
-		packet.push(crc);
-		packet.push(STOP_BYTE);
+        Ok(())
+    }
 
-		self.serialport.write(&packet)?;
+    /// Checks if there is data available to read.
+    /// If there is data available, it will return the data.
+    pub fn available<T: Sized, const COUNT: usize>(&mut self) -> Result<Option<T>, Error> {
+        //while self.serialport.bytes_to_read()? > 0 {
+        loop {
+            //show state and status in test only
+            let mut byte: [u8; 1] = [0; 1];
+            let read_bytes_count = self.read_write.read(&mut byte)?;
+            println!("byte: {:?}", byte);
+            if read_bytes_count == 0 {
+                break;
+            };
 
-		Ok(())
-	}
+            match self.next_token {
+                NextToken::StartByte => {
+                    if byte[0] == START_BYTE {
+                    	self.next_token = NextToken::IdByte;
+                    }
+                }
+                NextToken::IdByte => {
+                    self.id_byte = byte[0];
+                    self.next_token = NextToken::OverheadByte;
+                }
+                NextToken::OverheadByte => {
+                    self.overhead_byte = byte[0];
+                    self.next_token = NextToken::PayloadLength;
+                }
+                NextToken::PayloadLength => {
+                    if byte[0] > 0 && byte[0] < MAX_PACKET_SIZE {
+                        self.payload_length = byte[0];
+                        self.next_token = NextToken::Payload;
+                        self.payload.clear();
+                    } else {
+                        self.next_token = NextToken::StartByte;
+                    }
+                }
+                NextToken::Payload => {
+                    if self.payload.len() < self.payload_length.into() {
+                        self.payload.push(byte[0]);
 
-	pub fn available<T : Sized, const COUNT: usize>(&mut self) -> Result<Option<T>,Error> {
+                        if self.payload.len() == self.payload_length.into() {
+                            self.next_token = NextToken::Crc;
+                        } else {
+                            self.next_token = NextToken::Payload;
+                        }
+                    }
+                }
+                NextToken::Crc => {
+                    let calculated_crc =
+                        self.crc.calculate(&self.payload, Some(self.payload_length));
+                    let received_crc = byte[0];
 
-		while self.serialport.bytes_to_read()? > 0 {
-			//show state and status in test only
+                    //decode data with COBS
+                    self.payload = self.decode_data_cobs(self.payload.clone(), self.overhead_byte);
 
-			let mut byte : [u8;1] = [0;1];
-			self.serialport.read(&mut byte)?;
+                    if calculated_crc == received_crc {
+                        self.next_token = NextToken::StopByte;
+                    } else {
+                        self.next_token = NextToken::StartByte;
+                    }
+                }
+                NextToken::StopByte => {
+                    self.next_token = NextToken::StartByte;
 
-			match self.transfer_state {
-				TransferState::FindStartByte => {
-					if byte[0] == START_BYTE {
-						self.transfer_state = TransferState::FindIdByte; 
-					}
-				},
-				TransferState::FindIdByte => {
-					self.id_byte = byte[0];
-					self.transfer_state = TransferState::FindOverheadByte;	
-				},
-				TransferState::FindOverheadByte => {
-					self.overhead_byte = byte[0];
-					self.transfer_state = TransferState::FindPayloadLength;
-				},
-				TransferState::FindPayloadLength => {
-					if byte[0] > 0 && byte[0] < MAX_PACKET_SIZE {
-						self.payload_length = byte[0];
-						self.transfer_state = TransferState::FindPayload;
-						self.payload.clear();
-					}else{
-						self.transfer_state = TransferState::FindStartByte;
-						self.status = TransferStatus::PayloadError;
-					}
-				},
-				TransferState::FindPayload => {
-					if self.payload.len() < self.payload_length.into() {
-						self.payload.push(byte[0]);
-	
-						if self.payload.len() == self.payload_length.into() {
+                    if byte[0] == STOP_BYTE {
+                        self.next_token = NextToken::StartByte;
+                        let buffer_conversion: Result<[u8; COUNT], Vec<u8>> =
+                            self.payload.clone().try_into();
 
-							self.transfer_state = TransferState::FindCrc;
-						} else {
-							self.transfer_state = TransferState::FindPayload;
-						}
-					}
-				},
-				TransferState::FindCrc => {
-					
-					let calculated_crc = self.crc.calculate(&self.payload,Some(self.payload_length));
-					let received_crc = byte[0];
+                        match buffer_conversion {
+                            Ok(buffer) => {
+                                let dst: T = unsafe { transmute_copy(&buffer) };
+                                return Ok(Some(dst));
+                            }
+                            Err(_) => {
+								return Ok(None);
+                            }
+                        }
+                    } else {
+						self.next_token = NextToken::StartByte;
+						return Ok(None);
+                    }
+                }
+            }
+        }
 
-					//decode data with COBS
-					self.payload = self.decode_data_cobs(self.payload.clone(),self.overhead_byte);
+        Ok(None)
+    }
 
-					if calculated_crc == received_crc {
-						self.transfer_state = TransferState::FindStopByte;
-					} else {
-						self.transfer_state = TransferState::FindStartByte;
-						self.status = TransferStatus::CrcError;
-					}
-				},
-				TransferState::FindStopByte => {
-					self.transfer_state = TransferState::FindStartByte;
-	
-					if byte[0] == STOP_BYTE {
-						self.transfer_state = TransferState::FindStartByte;
-						self.status = TransferStatus::NewData;
-						let buffer_conversion : Result<[u8;COUNT],Vec<u8>> = self.payload.clone().try_into();
+    fn encode_data_cobs(&mut self, mut data: Vec<u8>) -> Vec<u8> {
+        //find last byte
+        let mut last_byte_index: Option<usize> = None;
+        for i in (0..data.len()).rev() {
+            if data[i] == START_BYTE {
+                last_byte_index = Some(i);
+                break;
+            }
+        }
 
-						match buffer_conversion {
-							Ok(buffer) => {
-								let dst : T = unsafe { transmute_copy(&buffer) };
-								return Ok(Some(dst))
-							}
-							Err(_) => {
-								self.status = TransferStatus::PayloadError;
-							}
-						}
-					} else {
-						self.status = TransferStatus::StopByteError;
-					}
-				},
-			}
-		}
+        match last_byte_index {
+            Some(index) => {
+                let mut reference_index: u8 = index as u8;
 
-		Ok(None)
-	}
+                for i in (0..data.len() as u8).rev() {
+                    if data[i as usize] == START_BYTE {
+                        let (new_reference_index, _overflowed) = reference_index.overflowing_sub(i);
+                        data[i as usize] = new_reference_index;
+                        reference_index = i;
+                    }
+                }
 
-	fn encode_data_cobs(&mut self, mut data : Vec<u8>) -> Vec<u8> {
-		//find last byte
-		let mut last_byte_index : Option<usize> = None;
-		for i in (0..data.len()).rev() {
-			if data[i] == START_BYTE {
-				last_byte_index = Some(i);
-				break;
-			}
-		}
+                data
+            }
+            None => data,
+        }
+    }
 
-		match last_byte_index {
-			Some(index) => {
-				let mut reference_index : u8 = index as u8;
+    fn decode_data_cobs(&mut self, mut data: Vec<u8>, overhead_byte: u8) -> Vec<u8> {
+        let mut reference_index = overhead_byte;
+        let mut overflowed;
 
-				for i in (0..data.len() as u8).rev() {
-					if data[i as usize] == START_BYTE {
-						let (new_reference_index, _overflowed) = reference_index.overflowing_sub(i);
-						data[i as usize] = new_reference_index as u8;
-						reference_index = i;
-					}
-				}
+        while reference_index < data.len() as u8 {
+            let offset = data[reference_index as usize];
+            data[reference_index as usize] = START_BYTE;
+            (reference_index, overflowed) = reference_index.overflowing_add(offset);
+            if overflowed {
+                break;
+            }
+        }
 
-				data
-			},
-			None => {
-				data
-			}
-		}
-	}
+        data
+    }
 
-	fn decode_data_cobs(&mut self, mut data : Vec<u8>, overhead_byte : u8) -> Vec<u8> {
-		let mut reference_index = overhead_byte;
-		let mut overflowed;
-
-		while reference_index < data.len() as u8 {
-			let offset = data[reference_index as usize];
-			data[reference_index as usize] = START_BYTE;
-			(reference_index, overflowed) = reference_index.overflowing_add(offset);
-			if overflowed { break; }
-		}
-
-		data
-	}
-
-	pub fn flush(&mut self) -> Result<(),Error> {
-		self.serialport.flush()?;
-		Ok(())
-	}
+    /// Flushes the write buffer of the serial port.
+    /// Careful: This function is blocking and will wait until all data has been written.
+    pub fn flush(&mut self) -> Result<(), Error> {
+        self.read_write.flush()?;
+        Ok(())
+    }
 }
