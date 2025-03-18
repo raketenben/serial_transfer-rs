@@ -19,14 +19,9 @@ impl CRC {
         CRC { table }
     }
 
-    pub fn calculate(&self, data: &Vec<u8>, length: Option<u8>) -> u8 {
-        let length = match length {
-            Some(length) => length,
-            None => data.len() as u8,
-        };
-
+    pub fn calculate(&self, data: &[u8]) -> u8 {
         let mut crc: u8 = 0;
-        for i in 0..length {
+        for i in 0..data.len() {
             let byte = match data.get(i as usize) {
                 Some(byte) => byte,
                 None => break,
